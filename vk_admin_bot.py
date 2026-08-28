@@ -54,6 +54,27 @@ DB_PATH = os.getenv("DB_PATH", os.path.join(BASE, "pult.db"))
 SUGGEST_POLL_SECONDS = int(os.getenv("SUGGEST_POLL_SECONDS", "180"))
 AUTO_MIN_CONFIDENCE = float(os.getenv("AUTO_MIN_CONFIDENCE", "0.75"))
 
+# ── ПРЕДОХРАНИТЕЛИ ───────────────────────────────────────────────────────────
+# Пока выключено, бот НИЧЕГО не пишет в ВК от имени сообщества: только
+# показывает в Telegram, что он бы ответил. Включать, когда станете админом.
+def flag(name: str, env: str) -> bool:
+    v = os.getenv(env, "").strip().lower()
+    if v in ("on", "1", "yes", "да"):
+        return True
+    if v in ("off", "0", "no", "нет"):
+        return False
+    return kv_get(name, "0") == "1"
+
+
+def vk_writing_on() -> bool:
+    """Разрешена ли вообще отправка сообщений жителям."""
+    return flag("vk_send", "VK_SEND")
+
+
+def auto_dialog_on() -> bool:
+    """Отвечает ли бот сам на входящие (меню заказа рекламы)."""
+    return vk_writing_on() and flag("auto_dialog", "VK_AUTO_DIALOG")
+
 MSK = ZoneInfo("Europe/Moscow")
 VK_API = "https://api.vk.com/method/"
 VK_VER = "5.199"
@@ -141,6 +162,10 @@ async def user_name(user_id: int) -> str:
 async def vk_send(user_id: int, text: str, kind: str = "",
                   keyboard: str | None = None) -> str:
     """Отправить сообщение жителю от имени сообщества. Возвращает пометку для карточки."""
+    if not vk_writing_on():
+        log.info("тихий режим: НЕ отправлено id%s [%s]", user_id, kind)
+        return ("🔇 <b>не отправлено</b> — бот в тихом режиме, "
+                "в группе ничего не появилось. Включить: /replies on")
     try:
         extra = {"keyboard": keyboard} if keyboard else {}
         await vk("messages.send", user_id=user_id,
@@ -397,7 +422,8 @@ async def send_suggest_card(item: dict):
     rec = kind if (kind != "news" and conf >= 0.45) else None
 
     # полный автомат: сам переносим в тему и пишем автору
-    if (auto_on() and kind in T.MOVE_TARGETS and conf >= AUTO_MIN_CONFIDENCE):
+    if (auto_on() and vk_writing_on() and kind in T.MOVE_TARGETS
+            and conf >= AUTO_MIN_CONFIDENCE):
         try:
             res = await move_to_topic(item["id"], aid, kind)
             undo = InlineKeyboardMarkup(inline_keyboard=[[
@@ -686,6 +712,7 @@ async def on_start(m: Message):
     if saved is None:
         kv_set("admin_chat", m.chat.id)
         await m.answer(
+            mode_line() + "\n\n"
             "🎛 <b>Пульт «Подслушано МЭЗ \\ Малаховка» подключён.</b>\n\n"
             "Сюда приходят предложка и сообщения группы — с кнопками ответов.\n"
             "Чтобы ответить своими словами, сделай свайп-ответ на карточку.\n\n"
@@ -707,7 +734,7 @@ async def on_start(m: Message):
 async def on_check(m: Message):
     if not is_admin(m):
         return
-    lines = ["🔎 <b>Самопроверка</b>"]
+    lines = ["🔎 <b>Самопроверка</b>", mode_line(), ""]
     try:
         g = await vk("groups.getById", group_id=GROUP_ID, fields="members_count",
                      _token=VK_COMMUNITY_TOKEN)
@@ -737,6 +764,57 @@ async def on_check(m: Message):
 
 def auto_on() -> bool:
     return kv_get("auto_move", "0") == "1"
+
+
+def mode_line() -> str:
+    """Одной строкой: пишет бот в группу или молчит."""
+    if not vk_writing_on():
+        return ("🔇 <b>ТИХИЙ РЕЖИМ</b> — бот не пишет в группу ничего. "
+                "Кнопки ответов показывают текст, но не отправляют его.")
+    parts = ["🔊 <b>Отправка включена</b> — бот пишет жителям от имени сообщества",
+             "💬 автоответ на «реклама»: " + ("включён" if auto_dialog_on() else "выключен"),
+             "🤖 автоперенос предложки: " + ("включён" if auto_on() else "выключен")]
+    return "\n".join(parts)
+
+
+@dp.message(Command("replies"))
+async def on_replies(m: Message):
+    if not is_admin(m):
+        return
+    arg = (m.text or "").split()[-1].lower()
+    if arg in ("on", "вкл", "1"):
+        kv_set("vk_send", "1")
+        await m.answer("🔊 <b>Отправка включена.</b> Теперь кнопки ответов реально "
+                       "пишут людям от имени сообщества.\n\nВыключить: /replies off")
+    elif arg in ("off", "выкл", "0"):
+        kv_set("vk_send", "0")
+        kv_set("auto_dialog", "0")
+        await m.answer("🔇 <b>Тихий режим.</b> Бот больше ничего не пишет в группу — "
+                       "ни ответов, ни автопереносов. Всё приходит только сюда.")
+    else:
+        await m.answer(mode_line() + "\n\n/replies on — разрешить писать\n"
+                                     "/replies off — тихий режим")
+
+
+@dp.message(Command("dialog"))
+async def on_dialog_mode(m: Message):
+    if not is_admin(m):
+        return
+    arg = (m.text or "").split()[-1].lower()
+    if arg in ("on", "вкл", "1"):
+        if not vk_writing_on():
+            await m.answer("Сначала разрешите боту писать: /replies on")
+            return
+        kv_set("auto_dialog", "1")
+        await m.answer("💬 Автоответ включён: на слова «реклама», «прайс», «цена» бот "
+                       "сам присылает меню и ведёт человека к брони.")
+    elif arg in ("off", "выкл", "0"):
+        kv_set("auto_dialog", "0")
+        await m.answer("💬 Автоответ выключен. Сообщения жителей просто приходят сюда "
+                       "карточками, отвечаете вы.")
+    else:
+        await m.answer(mode_line() + "\n\n/dialog on — включить автоответ\n"
+                                     "/dialog off — выключить")
 
 
 @dp.message(Command("auto"))
@@ -1384,11 +1462,12 @@ async def messages_loop():
                 for upd in data.get("updates", []):
                     if upd.get("type") == "message_new":
                         m = upd["object"]["message"]
-                        try:
-                            handled = await dialog_step(m)
-                        except Exception:
-                            log.exception("диалог заказа упал")
-                            handled = False
+                        handled = False
+                        if auto_dialog_on():
+                            try:
+                                handled = await dialog_step(m)
+                            except Exception:
+                                log.exception("диалог заказа упал")
                         if not handled:
                             await send_message_card(m)
         except Exception:
