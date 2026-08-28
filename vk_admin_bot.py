@@ -179,7 +179,7 @@ def fill(text: str) -> str:
     return text.format(
         dates=free_dates(), pay=PAY_DETAILS, link="",
         market=T.topic_url(T.T_MARKET), jobs=T.topic_url(T.T_JOBS),
-        rent=T.topic_url(T.T_RENT), pets=T.topic_url(T.T_PETS),
+        rent=T.topic_url(T.T_RENT), pets=T.PETS_CHAT_URL,
         lost=T.topic_url(T.T_LOST),
     ) if "{" in text else text
 
@@ -287,7 +287,7 @@ def sug_kb(pid: int, aid: int, menu: str = "root",
         rows += [
             [b("✅ Опубликовать", f"s:pub:{pid}:{aid}"),
              b(f"🕖 В {EVENING_HOUR}:00", f"s:sch:{pid}:{aid}")],
-            [b("🐾 В потеряшки + ответ автору", f"s:mv_pets:{pid}:{aid}")],
+            [b("🐾 В чат потеряшек + ответ автору", f"s:mv_pets:{pid}:{aid}")],
             [b("📂 В другую тему", f"sn:move:{pid}:{aid}"),
              b("💰 Коммерция", f"s:sug_comm:{pid}:{aid}")],
             [b("📅 По брони с сайта", f"sn:book:{pid}:{aid}")],
@@ -929,7 +929,7 @@ async def on_reply_button(cb: CallbackQuery):
     label, template = T.REPLIES[key]
     text = template
     if key == "pets":
-        text = template.format(link=T.topic_url(T.T_PETS))
+        text = template.format(link=T.PETS_CHAT_URL)
     else:
         text = fill(template)
     await cb.answer("Отправляю…")
@@ -947,7 +947,79 @@ async def on_sug_menu(cb: CallbackQuery):
     await cb.answer()
 
 
+async def reupload_photos_for_message(attachments) -> list[str]:
+    """Перезалить фото так, чтобы их можно было отправить сообщением в чат."""
+    out, sess = [], await http()
+    for a in attachments or []:
+        if a.get("type") != "photo":
+            continue
+        sizes = a["photo"].get("sizes") or []
+        if not sizes:
+            continue
+        try:
+            async with sess.get(max(sizes, key=lambda s: s.get("width", 0))["url"]) as r:
+                blob = await r.read()
+            up = await vk("photos.getMessagesUploadServer", peer_id=T.PETS_CHAT_PEER,
+                          _token=VK_COMMUNITY_TOKEN)
+            form = aiohttp.FormData()
+            form.add_field("photo", blob, filename="photo.jpg", content_type="image/jpeg")
+            async with sess.post(up["upload_url"], data=form) as r:
+                res = await r.json(content_type=None)
+            saved = await vk("photos.saveMessagesPhoto", photo=res["photo"],
+                             server=res["server"], hash=res["hash"],
+                             _token=VK_COMMUNITY_TOKEN)
+            out.append(f"photo{saved[0]['owner_id']}_{saved[0]['id']}")
+        except Exception:
+            log.exception("не перезалилось фото для чата")
+    return out
+
+
+async def move_to_pets_chat(pid: int, aid: int) -> str:
+    """Объявление о животных уходит в чат сообщества к волонтёрам."""
+    raw = kv_get(f"post:{pid}")
+    cached = json.loads(raw) if raw else {}
+    if not cached:
+        resp = await vk("wall.get", owner_id=-GROUP_ID, filter="suggests", count=100)
+        for it in resp.get("items", []):
+            if it["id"] == pid:
+                cached = {"text": it.get("text") or "",
+                          "attachments": it.get("attachments") or [],
+                          "from_id": it.get("from_id", aid)}
+                break
+    text = (cached.get("text") or "").strip()
+    attachments = cached.get("attachments") or []
+    name = await user_name(aid)
+    body = ("🐾 Объявление из сообщества\n\n" + (text or "(без текста)") +
+            f"\n\nАвтор: [id{aid}|{name}] — пишите ему напрямую.")
+
+    photos = await reupload_photos_for_message(attachments)
+    out = []
+    try:
+        await vk("messages.send", peer_id=T.PETS_CHAT_PEER,
+                 random_id=int(time.time() * 1000) % 2_000_000_000,
+                 message=body, attachment=",".join(photos),
+                 _token=VK_COMMUNITY_TOKEN)
+        out.append("🐾 Опубликовано в чате потеряшек")
+        if attachments and not photos:
+            out[-1] += " (фото не перенеслись)"
+    except VKError as e:
+        return f"⚠️ Не смог написать в чат: {e}"
+
+    try:
+        await vk("wall.delete", owner_id=-GROUP_ID, post_id=pid)
+        out.append("убрано из предложки")
+    except VKError as e:
+        out.append(f"из предложки не удалилось ({e})")
+
+    res = await vk_send(aid, T.SUG_PETS.format(link=T.PETS_CHAT_URL), kind="move_pets")
+    db.execute("DELETE FROM kv WHERE k=?", (f"post:{pid}",))
+    db.commit()
+    return ", ".join(out) + chr(10) + res + chr(10) + T.PETS_CHAT_URL
+
+
 async def move_to_topic(pid: int, aid: int, key: str) -> str:
+    if key == "pets":
+        return await move_to_pets_chat(pid, aid)
     topic_id, reply_text, label = T.MOVE_TARGETS[key]
     raw = kv_get(f"post:{pid}")
     cached = json.loads(raw) if raw else {}
