@@ -1,0 +1,6 @@
+.env
+.venv/
+pult.db
+test_pult.db
+__pycache__/
+*.pyc

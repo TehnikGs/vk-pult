@@ -1,0 +1,17 @@
+[Unit]
+Description=Телеграм-пульт сообщества «Подслушано МЭЗ \ Малаховка»
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/vk-pult
+ExecStart=/opt/vk-pult/.venv/bin/python /opt/vk-pult/vk_admin_bot.py
+Restart=always
+RestartSec=10
+User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
