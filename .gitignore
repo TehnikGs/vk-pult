@@ -4,3 +4,6 @@ pult.db
 test_pult.db
 __pycache__/
 *.pyc
+conv.json
+groups.json
+*.tmp
