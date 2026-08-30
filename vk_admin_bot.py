@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import socket
 import sqlite3
 import time
 from datetime import date, datetime, timedelta
@@ -210,6 +211,22 @@ def fill(text: str) -> str:
 
 
 # ---------------------------------------------------------------- Telegram
+class IPv4Session(AiohttpSession):
+    """Ходить в Telegram только по IPv4.
+
+    На некоторых серверах api.telegram.org резолвится в IPv6-адрес, которого
+    у машины нет: соединение висит до таймаута и бот падает по кругу.
+    """
+
+    async def create_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(family=socket.AF_INET),
+                json_serialize=self.json_dumps)
+            self._should_reset_connector = False
+        return self._session
+
+
 tg_session = None
 if TG_PROXY:
     try:
@@ -227,6 +244,9 @@ if TG_PROXY:
         tg_session = Socks5RdnsSession()
     except ImportError:
         log.warning("aiohttp_socks не установлен — TG_PROXY игнорирую")
+elif os.getenv("TG_FORCE_IPV4", "1") != "0":
+    tg_session = IPv4Session()
+    log.info("Telegram через IPv4")
 
 bot = Bot(TG_BOT_TOKEN, session=tg_session,
           default=DefaultBotProperties(parse_mode="HTML"))
