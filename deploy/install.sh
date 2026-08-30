@@ -54,9 +54,23 @@ echo "→ проверяю доступ к Telegram с этого сервера
 if curl -s --max-time 12 https://api.telegram.org >/dev/null 2>&1; then
   echo "  Telegram доступен напрямую — прокси не нужен"
 else
-  echo "  ⚠️  Telegram отсюда НЕ открывается."
-  echo "     Нужен прокси: впиши строку TG_PROXY=socks5://логин:пароль@адрес:порт"
-  echo "     в файл $DIR/.env (тот же прокси, что у задачника task-bot)."
+  echo "  ⚠️  Telegram отсюда НЕ открывается — нужен прокси."
+  FOUND=$(grep -rh "^TG_PROXY=" /root/myapp/task-bot/.env /root/task-bot/.env 2>/dev/null | head -1)
+  if [ -n "$FOUND" ]; then
+    echo "  Нашёл рабочий прокси у задачника, беру его же:"
+    echo "  $FOUND"
+    sed -i "s|^TG_PROXY=.*|$FOUND|" "$DIR/.env"
+    "$DIR/.venv/bin/pip" install -q aiohttp-socks
+  else
+    echo "     Впиши строку TG_PROXY=socks5://логин:пароль@адрес:порт"
+    echo "     в файл $DIR/.env — тот же прокси, что у задачника task-bot."
+  fi
+fi
+
+# ─────────────── дела, переданные предыдущим админом ───────────────
+if [ ! -f "$DIR/pult.db" ]; then
+  echo "→ переношу клиентов и график закрепа"
+  (cd "$DIR" && "$DIR/.venv/bin/python" import_lera.py | head -6)
 fi
 
 echo "→ служба"
@@ -68,9 +82,10 @@ systemctl --no-pager -l status vk-pult | head -14
 
 echo
 echo "ГОТОВО."
-echo "1) Останови бота на ноутбуке (закрой чёрное окно) — иначе они будут мешать друг другу."
+echo "1) Останови бота на ноутбуке (закрой чёрное окно) — иначе они мешают друг другу."
 echo "2) Напиши боту в Telegram /start — он привяжется к твоему чату уже с сервера."
-echo "3) Проверь: /check и /grafik"
+echo "3) Разреши отправку: /replies on   (без этого кнопки ответов молчат)"
+echo "4) Проверь: /check, /pins, /clients"
 echo
 echo "Полезное:"
 echo "  журнал:      journalctl -u vk-pult -f"
