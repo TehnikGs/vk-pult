@@ -7,6 +7,19 @@ set -e
 DIR=/opt/vk-pult
 REPO=${REPO:-https://github.com/TehnikGs/vk-pult.git}
 
+echo "→ проверяю, что есть git и python"
+for pkg in git python3-venv curl; do
+  case "$pkg" in
+    git)  command -v git  >/dev/null || MISSING="$MISSING git" ;;
+    curl) command -v curl >/dev/null || MISSING="$MISSING curl" ;;
+    python3-venv) python3 -c "import venv" 2>/dev/null || MISSING="$MISSING python3-venv" ;;
+  esac
+done
+if [ -n "$MISSING" ]; then
+  echo "  ставлю:$MISSING"
+  apt-get update -qq && apt-get install -y -qq $MISSING
+fi
+
 echo "→ забираю код"
 if [ -d "$DIR/.git" ]; then
   git -C "$DIR" pull --ff-only
@@ -23,15 +36,23 @@ fi
 
 # ─────────────────────────── настройки ───────────────────────────
 if [ ! -f "$DIR/.env" ]; then
-  echo
-  echo "Теперь нужны ключи. Вставляй по одному, каждый — Enter."
-  echo "Они есть в файле .env на твоём ноутбуке (папка vk-admin-bot),"
-  echo "или спроси у Claude — он их знает."
-  echo
-  read -rp "1/4 Ключ сообщества ВК (vk1.a....): " VKC
-  read -rp "2/4 Личный ключ админа ВК (vk1.a....): " VKU
-  read -rp "3/4 Токен телеграм-бота (цифры:буквы): " TGT
-  read -rp "4/4 Реквизиты для оплаты (одной строкой): " PAYD
+  # ключи можно передать заранее переменными, иначе спросим по одному
+  VKC="${VK_COMMUNITY_TOKEN:-}"
+  VKU="${VK_USER_TOKEN:-}"
+  TGT="${TG_BOT_TOKEN:-}"
+  PAYD="${PAY_DETAILS:-Оплата на ВТБ по номеру телефона 8 926 033-77-22. На Сбер переводить не нужно — платёж не дойдёт.}"
+  if [ -z "$VKC" ] || [ -z "$VKU" ] || [ -z "$TGT" ]; then
+    echo
+    echo "Теперь нужны ключи. Вставляй по одному, каждый — Enter."
+    echo "Они есть в файле .env на твоём ноутбуке (папка vk-admin-bot),"
+    echo "или спроси у Claude — он их знает."
+    echo
+    [ -n "$VKC" ] || read -rp "1/4 Ключ сообщества ВК (vk1.a....): " VKC
+    [ -n "$VKU" ] || read -rp "2/4 Личный ключ админа ВК (vk1.a....): " VKU
+    [ -n "$TGT" ] || read -rp "3/4 Токен телеграм-бота (цифры:буквы): " TGT
+    read -rp "4/4 Реквизиты для оплаты (Enter — оставить как есть): " PAYD_IN
+    [ -n "$PAYD_IN" ] && PAYD="$PAYD_IN"
+  fi
   cat > "$DIR/.env" <<ENVFILE
 VK_COMMUNITY_TOKEN=$VKC
 VK_USER_TOKEN=$VKU
