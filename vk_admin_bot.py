@@ -71,9 +71,7 @@ def vk_writing_on() -> bool:
     return flag("vk_send", "VK_SEND")
 
 
-def auto_dialog_on() -> bool:
-    """Отвечает ли бот сам на входящие (меню заказа рекламы)."""
-    return vk_writing_on() and flag("auto_dialog", "VK_AUTO_DIALOG")
+# автоответов больше нет: бот пишет людям только когда вы нажали кнопку
 
 MSK = ZoneInfo("Europe/Moscow")
 VK_API = "https://api.vk.com/method/"
@@ -312,10 +310,13 @@ def sug_kb(pid: int, aid: int, menu: str = "root",
         rows += [
             [b("✅ Опубликовать", f"s:pub:{pid}:{aid}"),
              b(f"🕖 В {EVENING_HOUR}:00", f"s:sch:{pid}:{aid}")],
-            [b("🐾 В чат потеряшек + ответ автору", f"s:mv_pets:{pid}:{aid}")],
+        ]
+        if rec != "pets":
+            rows.append([b("🐾 В чат потеряшек + ответ автору", f"s:mv_pets:{pid}:{aid}")])
+        rows += [
             [b("📂 В другую тему", f"sn:move:{pid}:{aid}"),
              b("💰 Коммерция", f"s:sug_comm:{pid}:{aid}")],
-            [b("📅 По брони с сайта", f"sn:book:{pid}:{aid}")],
+            [b("📅 По брони", f"sn:book:{pid}:{aid}")],
             [b("📷 Нужны детали", f"s:sug_details:{pid}:{aid}"),
              b("✍️ Свой ответ", f"mw:{aid}")],
             [b("❌ Отклонить", f"s:del:{pid}:{aid}"),
@@ -461,10 +462,6 @@ async def send_suggest_card(item: dict):
 
 
 # ---------------------------------------------------------------- заказ в переписке ВК
-ORDER_WORDS = ("реклам", "прайс", "стоимост", "сколько стоит", "разместить",
-               "размещение", "цен", "заказать", "объявлен")
-
-
 def order_card(o: dict, extra: str = "") -> str:
     when = f"{O.fmt_day_ru(o['date'])}"
     if o["kind"] == "slot" and o["slot"]:
@@ -483,142 +480,6 @@ def order_kb(oid: int, uid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [b("✅ Оплата пришла", f"o:ok:{oid}"), b("❌ Отменить", f"o:no:{oid}")],
         [b("✍️ Написать клиенту", f"mw:{uid}")]])
-
-
-async def dialog_step(msg: dict) -> bool:
-    """Ведёт человека по шагам заказа. True — сообщение обработано ботом."""
-    uid = msg.get("from_id", 0)
-    text = (msg.get("text") or "").strip()
-    low = text.lower()
-    payload = {}
-    if msg.get("payload"):
-        try:
-            payload = json.loads(msg["payload"])
-        except Exception:
-            payload = {}
-    cmd = payload.get("c", "")
-    state, data = O.get_state(db, uid)
-
-    # скриншот оплаты: фото от человека с живой заявкой
-    has_photo = any(a.get("type") == "photo" for a in msg.get("attachments") or [])
-    if has_photo and not cmd:
-        o = O.user_active_order(db, uid)
-        if o and o["status"] in ("hold", "paid_wait"):
-            O.set_status(db, o["id"], "paid_wait")
-            await vk_send(uid, "Скриншот получили, спасибо! Проверим оплату и подтвердим — "
-                               "обычно в течение часа. После этого пришлите текст объявления "
-                               "и картинки, поставим в очередь на выбранное время.",
-                          kind="paid_screenshot")
-            o = O.get_order(db, o["id"])
-            await tg_admin(order_card(o, " — прислал скриншот оплаты"),
-                           reply_markup=order_kb(o["id"], uid), disable_web_page_preview=True)
-            return True
-        return False
-
-    if not cmd and state == "idle":
-        if not any(w in low for w in ORDER_WORDS):
-            return False
-        cmd = "menu"
-
-    if cmd in ("cancel",):
-        o = O.user_active_order(db, uid)
-        if o and o["status"] == "hold":
-            O.set_status(db, o["id"], "cancel")
-        O.set_state(db, uid, "idle", {})
-        await vk_send(uid, "Хорошо, отменил. Если понадобится — напишите «реклама», "
-                           "и начнём заново.", kind="order_cancel",
-                      keyboard=O.kb_menu())
-        return True
-
-    if cmd in ("menu",):
-        O.set_state(db, uid, "menu", {})
-        await vk_send(uid,
-                      "Здравствуйте! Помогу с рекламой в сообществе.\n\n"
-                      "У нас 15 700 подписчиков, посты за неделю набирают около "
-                      "68 000 просмотров. Читают жители Малаховки, МЭЗ, Красково "
-                      "и Люберец.\n\n"
-                      "Нажмите «Заказать рекламу» — покажу свободные дни и цены. "
-                      "Весь прайс тоже под рукой.",
-                      kind="order_menu", keyboard=O.kb_menu())
-        return True
-
-    if cmd == "price":
-        await vk_send(uid, fill(T.PRICE_FULL), kind="order_price", keyboard=O.kb_menu())
-        return True
-
-    if cmd == "ask":
-        O.set_state(db, uid, "idle", {})
-        await vk_send(uid, "Конечно, напишите вопрос сюда — отвечу лично.",
-                      kind="order_ask")
-        return True
-
-    if cmd == "order":
-        O.set_state(db, uid, "fmt", {})
-        await vk_send(uid, "Что размещаем? Выберите формат:",
-                      kind="order_fmt", keyboard=O.kb_formats())
-        return True
-
-    if cmd == "fmt":
-        fid = payload.get("v", "")
-        if fid not in O.FORMATS:
-            return False
-        days = O.free_days(db, fid, limit=6)
-        O.set_state(db, uid, "day", {"fmt": fid})
-        f = O.FORMATS[fid]
-        await vk_send(uid, f"{f['title']} — {f['hint']}.\n\nВыберите день:",
-                      kind="order_day", keyboard=O.kb_days(days, 1))
-        return True
-
-    if cmd == "more":
-        fid = data.get("fmt", "")
-        if fid not in O.FORMATS:
-            return False
-        offset = int(payload.get("v", 7))
-        days = O.free_days(db, fid, limit=6, start_offset=offset)
-        if not days:
-            await vk_send(uid, "Дальше пока не бронируем. Выберите из ближайших дней.",
-                          kind="order_day", keyboard=O.kb_days(O.free_days(db, fid), 1))
-            return True
-        await vk_send(uid, "Ещё даты:", kind="order_day",
-                      keyboard=O.kb_days(days, offset))
-        return True
-
-    if cmd == "day":
-        fid, ds = data.get("fmt", ""), payload.get("v", "")
-        if fid not in O.FORMATS or not ds:
-            return False
-        f = O.FORMATS[fid]
-        if f["kind"] == "pin":
-            return await make_order(uid, fid, ds, "")
-        data["day"] = ds
-        O.set_state(db, uid, "slot", data)
-        await vk_send(uid, f"{O.fmt_day_ru(ds)} — выберите время выхода:",
-                      kind="order_slot", keyboard=O.kb_slots(db, fid, ds))
-        return True
-
-    if cmd == "slot":
-        fid, ds, sid = data.get("fmt", ""), data.get("day", ""), payload.get("v", "")
-        if not (fid and ds and sid):
-            return False
-        return await make_order(uid, fid, ds, sid)
-
-    if cmd == "paid":
-        o = O.user_active_order(db, uid)
-        if not o or o["status"] not in ("hold", "paid_wait"):
-            await vk_send(uid, "Не вижу активной брони. Напишите «реклама», начнём заново.",
-                          kind="order_nopaid", keyboard=O.kb_menu())
-            return True
-        O.set_status(db, o["id"], "paid_wait")
-        await vk_send(uid, "Спасибо! Проверим оплату и подтвердим — обычно в течение часа.\n\n"
-                           "Если ещё не прислали скриншот перевода, отправьте его сюда: "
-                           "так проверка пройдёт быстрее.",
-                      kind="order_paid")
-        o = O.get_order(db, o["id"])
-        await tg_admin(order_card(o, " — нажал «я оплатил»"),
-                       reply_markup=order_kb(o["id"], uid), disable_web_page_preview=True)
-        return True
-
-    return False
 
 
 async def make_order(uid: int, fid: str, ds: str, sid: str) -> bool:
@@ -771,8 +632,8 @@ def mode_line() -> str:
     if not vk_writing_on():
         return ("🔇 <b>ТИХИЙ РЕЖИМ</b> — бот не пишет в группу ничего. "
                 "Кнопки ответов показывают текст, но не отправляют его.")
-    parts = ["🔊 <b>Отправка включена</b> — бот пишет жителям от имени сообщества",
-             "💬 автоответ на «реклама»: " + ("включён" if auto_dialog_on() else "выключен"),
+    parts = ["🔊 <b>Отправка включена</b> — кнопки реально пишут людям",
+             "💬 сам бот никому не отвечает: только по вашей кнопке",
              "🤖 автоперенос предложки: " + ("включён" if auto_on() else "выключен")]
     return "\n".join(parts)
 
@@ -788,33 +649,11 @@ async def on_replies(m: Message):
                        "пишут людям от имени сообщества.\n\nВыключить: /replies off")
     elif arg in ("off", "выкл", "0"):
         kv_set("vk_send", "0")
-        kv_set("auto_dialog", "0")
         await m.answer("🔇 <b>Тихий режим.</b> Бот больше ничего не пишет в группу — "
                        "ни ответов, ни автопереносов. Всё приходит только сюда.")
     else:
         await m.answer(mode_line() + "\n\n/replies on — разрешить писать\n"
                                      "/replies off — тихий режим")
-
-
-@dp.message(Command("dialog"))
-async def on_dialog_mode(m: Message):
-    if not is_admin(m):
-        return
-    arg = (m.text or "").split()[-1].lower()
-    if arg in ("on", "вкл", "1"):
-        if not vk_writing_on():
-            await m.answer("Сначала разрешите боту писать: /replies on")
-            return
-        kv_set("auto_dialog", "1")
-        await m.answer("💬 Автоответ включён: на слова «реклама», «прайс», «цена» бот "
-                       "сам присылает меню и ведёт человека к брони.")
-    elif arg in ("off", "выкл", "0"):
-        kv_set("auto_dialog", "0")
-        await m.answer("💬 Автоответ выключен. Сообщения жителей просто приходят сюда "
-                       "карточками, отвечаете вы.")
-    else:
-        await m.answer(mode_line() + "\n\n/dialog on — включить автоответ\n"
-                                     "/dialog off — выключить")
 
 
 @dp.message(Command("auto"))
@@ -858,29 +697,25 @@ async def on_report(m: Message):
 
 
 @dp.message(Command("slots"))
+@dp.message(Command("grafik"))
 async def on_slots(m: Message):
     if not is_admin(m):
         return
-    busy = booked_days()
-    rows = ["📅 <b>Календарь рекламы</b> (одна реклама в день)"]
-    d = date.today()
-    for _ in range(14):
-        k = d.isoformat()
-        mark = f"🔴 {busy[k][0]}" + (f" — {busy[k][1]} ₽" if busy[k][1] else "") \
-            if k in busy else "🟢 свободно"
-        rows.append(f"{d.strftime('%d.%m')} {WEEKDAYS[d.weekday()]} — {mark}")
-        d += timedelta(days=1)
-    rows.append("\nЗабронировать: /book 03.09 Кафе Прага 1500")
-    await m.answer("\n".join(rows))
+    await m.answer(O.schedule_text(db) +
+                   "\n\nЗабронировать: /book 03.09 12-14 Кафе Прага 1500"
+                   "\nСнять: /unbook 12")
 
 
 @dp.message(Command("book"))
 async def on_book(m: Message):
+    """Ручная бронь: /book 03.09 [время] Клиент [сумма]."""
     if not is_admin(m):
         return
     parts = (m.text or "").split()[1:]
     if len(parts) < 2:
-        await m.answer("Формат: /book 03.09 Кафе Прага 1500")
+        await m.answer("Формат: <code>/book 03.09 12-14 Кафе Прага 1500</code>\n"
+                       "Время можно не писать — поставлю 12-14.\n"
+                       "Окна: 08-11, 12-14, 15-17, 18-20")
         return
     try:
         dd, mm = parts[0].split(".")[:2]
@@ -891,37 +726,55 @@ async def on_book(m: Message):
     except Exception:
         await m.answer("Дату пиши как 03.09")
         return
-    amount = 0
+
     tail = parts[1:]
+    slot = "12-14"
+    if tail and tail[0] in [s[0] for s in O.SLOTS]:
+        slot = tail[0]
+        tail = tail[1:]
+    amount = None
     if tail and tail[-1].isdigit():
         amount = int(tail[-1])
         tail = tail[:-1]
     client = " ".join(tail) or "клиент"
-    db.execute("INSERT OR REPLACE INTO bookings (day, client, amount, created) "
-               "VALUES (?,?,?,?)", (day.isoformat(), client, amount,
-                                    datetime.now(MSK).isoformat(timespec="seconds")))
-    db.commit()
-    await m.answer(f"✅ {fmt_day(day)} — {client}" + (f", {amount} ₽" if amount else "") +
-                   f"\nСледующие свободные: {free_dates()}")
+
+    if slot in O.busy_slots(db, day.isoformat()):
+        await m.answer(f"⚠️ {fmt_day(day)} в {O.slot_title(slot)} уже занято. "
+                       f"Свободные дни: {free_dates()}")
+        return
+
+    oid = O.create_order(db, user_id=0, name=client, contact="", fmt="post",
+                         day=day.isoformat(), slot_id=slot, source="manual")
+    if amount is not None:
+        db.execute("UPDATE ad_orders SET price=? WHERE id=?", (amount, oid))
+        db.commit()
+    O.set_status(db, oid, "confirmed")
+    o = O.get_order(db, oid)
+    await m.answer(f"✅ Заявка №{oid}: {fmt_day(day)}, {O.slot_title(slot)} — "
+                   f"{client}, {o['price']} ₽\n"
+                   f"Ближайшие свободные дни: {free_dates()}\n\n"
+                   "Когда клиент пришлёт текст в предложку — на карточке жми "
+                   "«📅 По брони» и выбери эту заявку.")
 
 
 @dp.message(Command("unbook"))
 async def on_unbook(m: Message):
+    """Снять бронь: /unbook 12 (номер заявки из /grafik)."""
     if not is_admin(m):
         return
     parts = (m.text or "").split()[1:]
-    if not parts:
-        await m.answer("Формат: /unbook 03.09")
+    if not parts or not parts[0].isdigit():
+        await m.answer("Формат: <code>/unbook 12</code> — номер заявки из /grafik")
         return
-    try:
-        dd, mm = parts[0].split(".")[:2]
-        day = date(date.today().year, int(mm), int(dd))
-    except Exception:
-        await m.answer("Дату пиши как 03.09")
+    oid = int(parts[0])
+    o = O.get_order(db, oid)
+    if not o:
+        await m.answer("Заявки с таким номером нет.")
         return
-    db.execute("DELETE FROM bookings WHERE day=?", (day.isoformat(),))
-    db.commit()
-    await m.answer(f"Бронь на {fmt_day(day)} снята.")
+    O.set_status(db, oid, "cancel")
+    await m.answer(f"Заявка №{oid} снята: {O.fmt_day_ru(o['date'])} "
+                   f"{O.slot_title(o['slot'] or '')} — {o['name']}. Время снова свободно.")
+
 
 
 @dp.message(Command("income"))
@@ -1461,15 +1314,8 @@ async def messages_loop():
                 ts = data["ts"]
                 for upd in data.get("updates", []):
                     if upd.get("type") == "message_new":
-                        m = upd["object"]["message"]
-                        handled = False
-                        if auto_dialog_on():
-                            try:
-                                handled = await dialog_step(m)
-                            except Exception:
-                                log.exception("диалог заказа упал")
-                        if not handled:
-                            await send_message_card(m)
+                        # бот никогда не отвечает сам: только карточка в Telegram
+                        await send_message_card(upd["object"]["message"])
         except Exception:
             log.exception("messages_loop")
             await asyncio.sleep(10)

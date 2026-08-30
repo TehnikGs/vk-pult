@@ -283,7 +283,7 @@ REPLIES = {
     "news_thanks":  ("👍 Спасибо, опубликуем", NEWS_THANKS),
     "news_anon":    ("🕶 Опубликуем анонимно", NEWS_ANON),
     "news_rumors":  ("🚫 Про слухи", NEWS_NO_RUMORS),
-    "pets":         ("🐾 Про ветку потеряшек", PETS_INFO),
+    "pets":         ("🐾 Про чат потеряшек", PETS_INFO),
     "ads_free":     ("📦 Куда объявление", ADS_FREE),
 }
 
