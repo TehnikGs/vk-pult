@@ -31,6 +31,7 @@ from aiogram.types import (CallbackQuery, ForceReply, InlineKeyboardButton,
 from dotenv import load_dotenv
 
 import classify as C
+import clients as CL
 import orders as O
 import texts as T
 
@@ -95,6 +96,7 @@ db.execute("CREATE TABLE IF NOT EXISTS sent_log ("
            "id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, user_id INTEGER, kind TEXT)")
 db.commit()
 O.init(db)
+CL.init(db)
 
 
 def kv_get(k, default=None):
@@ -200,7 +202,7 @@ def free_dates(n: int = 3) -> str:
 def fill(text: str) -> str:
     """Подставить в текст ссылки, даты и реквизиты."""
     return text.format(
-        dates=free_dates(), pay=PAY_DETAILS, link="",
+        dates=free_dates(), pay=PAY_DETAILS, link="", article=T.ARTICLE_URL,
         market=T.topic_url(T.T_MARKET), jobs=T.topic_url(T.T_JOBS),
         rent=T.topic_url(T.T_RENT), pets=T.PETS_CHAT_URL,
         lost=T.topic_url(T.T_LOST),
@@ -625,6 +627,106 @@ async def on_check(m: Message):
 
 def auto_on() -> bool:
     return kv_get("auto_move", "0") == "1"
+
+
+# ────────────────── долги перед клиентами и закрепы ──────────────────
+@dp.message(Command("clients"))
+async def on_clients(m: Message):
+    if not is_admin(m):
+        return
+    await m.answer(CL.clients_text(db))
+
+
+@dp.message(Command("pins"))
+async def on_pins(m: Message):
+    if not is_admin(m):
+        return
+    await m.answer(CL.pins_text(db))
+
+
+@dp.message(Command("post"))
+async def on_spend_post(m: Message):
+    """Списать выпущенный пост: /post 3"""
+    if not is_admin(m):
+        return
+    parts = (m.text or "").split()[1:]
+    if not parts or not parts[0].isdigit():
+        await m.answer("Формат: <code>/post 3</code> — номер клиента из /clients")
+        return
+    row = CL.spend_post(db, int(parts[0]))
+    if not row:
+        await m.answer("Клиента с таким номером нет.")
+        return
+    left = row["posts_left"]
+    tail = f"осталось {left}" if left else "пакет закрыт, постов больше нет ✅"
+    await m.answer(f"Записал: {row['name']} — {tail}")
+
+
+@dp.message(Command("addposts"))
+async def on_add_posts(m: Message):
+    """Новый пакетный клиент: /addposts 5 Кафе Прага"""
+    if not is_admin(m):
+        return
+    parts = (m.text or "").split()[1:]
+    if len(parts) < 2 or not parts[0].isdigit():
+        await m.answer("Формат: <code>/addposts 5 Кафе Прага</code>")
+        return
+    name = " ".join(parts[1:])
+    cid = CL.add_client(db, name, int(parts[0]))
+    await m.answer(f"Добавил №{cid}: {name} — {parts[0]} постов.")
+
+
+@dp.message(Command("pinpaid"))
+async def on_pin_paid(m: Message):
+    if not is_admin(m):
+        return
+    parts = (m.text or "").split()[1:]
+    if not parts or not parts[0].isdigit():
+        await m.answer("Формат: <code>/pinpaid 3</code> — номер из /pins")
+        return
+    db.execute("UPDATE pins SET paid=1 WHERE id=?", (int(parts[0]),))
+    db.commit()
+    await m.answer("Отметил закреп как оплаченный.")
+
+
+@dp.message(Command("pindel"))
+async def on_pin_del(m: Message):
+    if not is_admin(m):
+        return
+    parts = (m.text or "").split()[1:]
+    if not parts or not parts[0].isdigit():
+        await m.answer("Формат: <code>/pindel 3</code>")
+        return
+    db.execute("DELETE FROM pins WHERE id=?", (int(parts[0]),))
+    db.commit()
+    await m.answer("Убрал из графика закрепов.")
+
+
+@dp.message(Command("addpin"))
+async def on_add_pin(m: Message):
+    """Новый закреп: /addpin 23.10 22.11 Марина Кадыкова"""
+    if not is_admin(m):
+        return
+    parts = (m.text or "").split()[1:]
+    if len(parts) < 3:
+        await m.answer("Формат: <code>/addpin 23.10 22.11 Марина Кадыкова</code>")
+        return
+
+    def parse(x):
+        dd, mm = x.split(".")[:2]
+        y = date.today().year
+        d = date(y, int(mm), int(dd))
+        return d if d >= date.today() - timedelta(days=180) else date(y + 1, int(mm), int(dd))
+
+    try:
+        a, b2 = parse(parts[0]), parse(parts[1])
+    except Exception:
+        await m.answer("Даты пиши как 23.10 22.11")
+        return
+    who = " ".join(parts[2:])
+    pid = CL.add_pin(db, who, a.isoformat(), b2.isoformat(), False)
+    await m.answer(f"Закреп №{pid}: {CL.fmt(a.isoformat())} — {CL.fmt(b2.isoformat())}, "
+                   f"{who}.\nПометить оплату: /pinpaid {pid}")
 
 
 def mode_line() -> str:
@@ -1355,6 +1457,39 @@ async def send_weekly_report():
     await tg_admin("\n".join(parts))
 
 
+async def reminders_loop():
+    """Каждое утро в 9:00 проверяет закрепы и долги по постам."""
+    while True:
+        now = datetime.now(MSK)
+        tgt = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        if tgt <= now:
+            tgt += timedelta(days=1)
+        await asyncio.sleep((tgt - now).total_seconds())
+        try:
+            if not admin_chat():
+                continue
+            for text in CL.due_reminders(db):
+                await tg_admin("⏰ <b>Напоминание</b>\n\n" + text)
+                await asyncio.sleep(0.4)
+            if datetime.now(MSK).weekday() == 0:      # по понедельникам — сводка
+                await tg_admin(CL.clients_text(db))
+                await tg_admin(CL.pins_text(db))
+        except Exception:
+            log.exception("reminders_loop")
+
+
+@dp.message(Command("today"))
+async def on_today(m: Message):
+    """Что горит сегодня — можно спросить в любой момент."""
+    if not is_admin(m):
+        return
+    items = CL.due_reminders(db)
+    if items:
+        await m.answer("⏰ <b>На сегодня</b>\n\n" + "\n\n".join(items))
+    else:
+        await m.answer("На сегодня напоминаний нет.\n\n" + CL.pins_text(db))
+
+
 async def weekly_report_loop():
     while True:
         now = datetime.now(MSK)
@@ -1377,6 +1512,7 @@ async def main():
     asyncio.create_task(suggests_loop())
     asyncio.create_task(messages_loop())
     asyncio.create_task(weekly_report_loop())
+    asyncio.create_task(reminders_loop())
     asyncio.create_task(site_loop())
     log.info("пульт запущен, группа -%s", GROUP_ID)
     await dp.start_polling(bot)
